@@ -33,6 +33,13 @@ Thèmes de Flexdesign (`design_themes`, `design_theme_colors`, `design_theme_fon
 compris (les applis qui se lient à un thème le lisent avec la clé anon) ; écriture réservée aux admins de
 Flexdesign et aux super admins. Le staff Flexdesign lit seulement (schéma dans le dépôt flexdesign).
 
+Moodboards de Flexdesign (`design_boards`, `design_board_members`, `design_board_links`, `design_board_items`,
+bucket privé `design-assets`) : un tableau n'est visible que par son propriétaire, les membres de l'équipe
+Flexdesign qu'il a choisis (lecture ou modification) et, s'il l'ouvre, toute l'équipe en lecture, et seulement
+tant qu'ils ont un rôle Flexdesign. Être admin de Flexdesign ou super admin ne donne aucun accès aux tableaux
+des autres. Le propriétaire seul gère le titre, le partage, le lien public et la suppression ; les membres en
+modification gèrent les images. Le lien public passe par `design_board_by_token` (visiteurs compris).
+
 ## Mettre en place la base de production
 
 1. Dans le SQL Editor de Supabase, exécuter dans cet ordre : `supabase/init.sql` de ce dépôt, puis
@@ -104,6 +111,11 @@ npm run test:rls
 au staff Flexform un rôle staff Flexdesign le temps du test (retiré à la fin) et vérifie : lecture publique,
 écriture et `design_save_theme` refusées à tout autre qu'un admin Flexdesign, thème incomplet ou couleur
 invalide refusés par la base, envoi dans `design-fonts` réservé aux admins et limité aux types de police.
+Pour les moodboards, il donne aussi à l'admin Flexform un rôle staff Flexdesign et vérifie : tableau invisible
+aux autres (super admin compris) tant qu'il n'est pas partagé, membre en lecture sans aucune écriture, membre en
+modification limité aux images (colonnes autorisées, fichier dans le dossier du tableau), partage, lien et
+réglages réservés au propriétaire, lien public coupé quand le propriétaire quitte l'équipe, fichiers de
+`design-assets` soumis aux mêmes droits (SVG et dossiers hors tableau refusés).
 Il refuse de tourner sur une autre base que la base locale. `npm run db:reset` repart d'une base vide,
 `npm run db:setup` applique les fichiers à la base en place sans rien effacer : dans les deux cas
 `supabase/init.sql` de ce dépôt puis celui de flexfolio, flexform et flexdesign, lus dans les dépôts clonés
