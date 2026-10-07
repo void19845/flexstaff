@@ -7,6 +7,7 @@
  *   npm run test:rls
  */
 import { spawnSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 
 const { SUPABASE_URL: SB, SUPABASE_ANON_KEY: ANON, SUPABASE_SERVICE_ROLE_KEY: SERVICE } = process.env;
 if (!SB?.includes("127.0.0.1") && !SB?.includes("localhost")) {
@@ -306,6 +307,174 @@ check("staff Flexdesign ne peut pas supprimer une police du stockage", (await pu
 const pngUp = await uploadFont(superAdmin.jwt, "rls-image.png", "image/png");
 check("le bucket refuse un fichier image/png, même pour un super admin", pngUp >= 400, `${pngUp}`);
 
+console.log("\n# Flexdesign : moodboards");
+// Deux comptes de l'équipe Flexdesign le temps de cette partie (rôles retirés au nettoyage) :
+// staff A = staff Flexform, staff B = admin Flexform, tous deux staff Flexdesign.
+const A = staff;
+const B = formAdmin;
+const serviceHeaders = { apikey: ANON, Authorization: `Bearer ${SERVICE}`, "Content-Type": "application/json" };
+/** Supprime les tableaux de test (titre rls-*) et leurs fichiers du bucket design-assets. */
+async function purgeBoards() {
+  const ids = ((await rest(SERVICE, "design_boards?select=id&title=like.rls-*")).data ?? []).map((b) => b.id);
+  for (const prefix of [...ids, "rls-dossier"]) {
+    const res = await fetch(`${SB}/storage/v1/object/list/design-assets`, { method: "POST", headers: serviceHeaders, body: JSON.stringify({ prefix, limit: 1000 }) });
+    const files = res.ok ? await res.json() : [];
+    if (files.length) await fetch(`${SB}/storage/v1/object/design-assets`, { method: "DELETE", headers: serviceHeaders, body: JSON.stringify({ prefixes: files.map((f) => `${prefix}/${f.name}`) }) });
+  }
+  await rest(SERVICE, "design_boards?title=like.rls-*", { method: "DELETE" });
+}
+const grantDesign = (who) => rest(SERVICE, "app_roles?on_conflict=user_id,app", { method: "POST", body: { user_id: who.id, app: "flexdesign", role: "staff" }, prefer: "resolution=merge-duplicates" });
+await purgeBoards();
+await grantDesign(A);
+await grantDesign(B);
+check("staff A et staff B sont staff de Flexdesign pour ce test", (await roleOf(A, "flexdesign")) === "staff" && (await roleOf(B, "flexdesign")) === "staff");
+
+const newBoard = (who, title, ownerId = who.id) => rest(who.jwt, "design_boards", { method: "POST", body: { title, owner_id: ownerId }, prefer: "return=representation" });
+const created1 = await newBoard(A, "rls-tableau");
+check("staff A crée un tableau", created1.status === 201 && created1.data?.[0]?.owner_id === A.id, JSON.stringify(created1));
+const boardId = created1.data?.[0]?.id;
+const otherBoardId = (await newBoard(A, "rls-autre")).data?.[0]?.id;
+check("staff A ne peut pas créer un tableau au nom d'un autre compte", refused(await newBoard(A, "rls-pirate", B.id)));
+check("admin Flexfolio (sans rôle Flexdesign) ne peut pas créer de tableau", refused(await newBoard(folioAdmin, "rls-pirate")));
+check("visiteur ne peut pas créer de tableau", refused(await rest(ANON, "design_boards", { method: "POST", body: { title: "rls-pirate" }, prefer: "return=representation" })));
+for (const table of ["design_boards", "design_board_members", "design_board_links", "design_board_items"]) {
+  check(`visiteur ne lit rien dans ${table}`, refused(await rest(ANON, `${table}?select=*`)));
+}
+
+const item = (board, by, folder = board) => ({ board_id: board, path: `${folder}/${randomUUID()}.png`, mime: "image/png", width_px: 10, height_px: 10, ...(by ? { created_by: by.id } : {}) });
+const postItem = (who, body) => rest(who.jwt, "design_board_items", { method: "POST", body, prefer: "return=representation" });
+const ownItem = await postItem(A, item(boardId));
+check("staff A pose une image sur son tableau", ownItem.status === 201, JSON.stringify(ownItem));
+const itemId = ownItem.data?.[0]?.id;
+const linkToken = randomBytes(32).toString("base64url");
+const link = await rest(A.jwt, "design_board_links", { method: "POST", body: { board_id: boardId, token: linkToken }, prefer: "return=representation" });
+check("staff A crée le lien public de son tableau", link.status === 201, JSON.stringify(link));
+
+const access = async (who) => (await rpc(who.jwt, "design_board_access", { p_board: boardId })).data;
+const seen = async (who) => {
+  const boards = (await rest(who.jwt, `design_boards?select=id&id=eq.${boardId}`)).data;
+  const items = (await rest(who.jwt, `design_board_items?select=id&board_id=eq.${boardId}`)).data;
+  return `${boards?.length ?? "erreur"} tableau, ${items?.length ?? "erreur"} image(s)`;
+};
+check("design_board_access renvoie owner pour staff A", (await access(A)) === "owner");
+for (const [who, label] of [[B, "staff B"], [superAdmin, "super admin"]]) {
+  const s = await seen(who);
+  check(`${label} ne lit pas le tableau privé de staff A`, s === "0 tableau, 0 image(s)", s);
+  check(`design_board_access renvoie null pour ${label}`, (await access(who)) === null);
+}
+
+// Membre en lecture
+const members = `design_board_members?board_id=eq.${boardId}`;
+const addMember = (who, userId, canEdit = false) => rest(who.jwt, "design_board_members", { method: "POST", body: { board_id: boardId, user_id: userId, can_edit: canEdit }, prefer: "return=representation" });
+const patchBoard = (who, body, id = boardId) => rest(who.jwt, `design_boards?id=eq.${id}`, { method: "PATCH", body, prefer: "return=representation" });
+const patchItem = (who, id, body) => rest(who.jwt, `design_board_items?id=eq.${id}`, { method: "PATCH", body, prefer: "return=representation" });
+const privilegeError = (r) => r.status >= 400 && r.data?.code === "42501";
+const memberCannotManage = async (prefix) => {
+  check(`${prefix} ne peut pas ajouter de membre`, refused(await addMember(B, superAdmin.id)));
+  check(`${prefix} ne peut pas changer les droits d'un membre`, refused(await rest(B.jwt, `${members}&user_id=eq.${B.id}`, { method: "PATCH", body: { can_edit: false }, prefer: "return=representation" })));
+  check(`${prefix} ne peut pas retirer de membre`, refused(await rest(B.jwt, members, { method: "DELETE", prefer: "return=representation" })));
+  check(`${prefix} ne lit pas le lien public`, refused(await rest(B.jwt, `design_board_links?select=token&board_id=eq.${boardId}`)));
+  check(`${prefix} ne peut pas supprimer le lien public`, refused(await rest(B.jwt, `design_board_links?board_id=eq.${boardId}`, { method: "DELETE", prefer: "return=representation" })));
+  check(`${prefix} ne peut pas renommer le tableau`, refused(await patchBoard(B, { title: "rls-piraté" })));
+  check(`${prefix} ne peut pas ouvrir le tableau à toute l'équipe`, refused(await patchBoard(B, { team_read: true })));
+  check(`${prefix} ne peut pas supprimer le tableau`, refused(await rest(B.jwt, `design_boards?id=eq.${boardId}`, { method: "DELETE", prefer: "return=representation" })));
+};
+const addB = await addMember(A, B.id);
+check("staff A partage son tableau avec staff B en lecture", addB.status === 201, JSON.stringify(addB));
+check("design_board_access renvoie read pour staff B", (await access(B)) === "read");
+check("staff B lit le tableau partagé et ses images", (await seen(B)) === "1 tableau, 1 image(s)");
+check("staff B en lecture ne peut pas poser d'image", refused(await postItem(B, item(boardId, B))));
+check("staff B en lecture ne peut pas déplacer une image", refused(await patchItem(B, itemId, { x: 50 })));
+await memberCannotManage("staff B en lecture");
+check("staff A ne peut pas partager avec un compte hors de l'équipe Flexdesign", refused(await addMember(A, folioAdmin.id)));
+check("staff A ne peut pas s'ajouter comme membre de son tableau", refused(await addMember(A, A.id)));
+
+// Membre en modification
+const setEdit = await rest(A.jwt, `${members}&user_id=eq.${B.id}`, { method: "PATCH", body: { can_edit: true }, prefer: "return=representation" });
+check("staff A donne à staff B le droit de modifier", setEdit.data?.[0]?.can_edit === true, JSON.stringify(setEdit));
+check("design_board_access renvoie edit pour staff B", (await access(B)) === "edit");
+const bItem = await postItem(B, item(boardId, B));
+check("staff B en modification pose une image", bItem.status === 201, JSON.stringify(bItem));
+const bItemId = bItem.data?.[0]?.id;
+const movedItem = await patchItem(B, itemId, { x: 50 });
+check("staff B en modification déplace une image", movedItem.data?.[0]?.x === 50, JSON.stringify(movedItem));
+const toOther = await patchItem(B, bItemId, { board_id: otherBoardId });
+check("staff B ne peut pas déplacer une image vers un autre tableau (droit de colonne)", privilegeError(toOther), JSON.stringify(toOther));
+const newPath = await patchItem(B, bItemId, { path: `${boardId}/${randomUUID()}.png` });
+check("staff B ne peut pas changer le fichier d'une image (droit de colonne)", privilegeError(newPath), JSON.stringify(newPath));
+const foreign = await postItem(B, item(boardId, B, otherBoardId));
+check("image refusée quand son fichier est dans le dossier d'un autre tableau", foreign.status === 400 && foreign.data?.code === "23514", JSON.stringify(foreign));
+check("staff B ne peut pas poser d'image sur un tableau non partagé", refused(await postItem(B, item(otherBoardId, B))));
+check("staff B ne peut pas poser une image au nom d'un autre compte", refused(await postItem(B, item(boardId, A))));
+await memberCannotManage("staff B en modification");
+check("le tableau, ses membres et son lien sont intacts après les tentatives de staff B",
+  (await rest(SERVICE, `design_boards?select=title,team_read&id=eq.${boardId}`)).data?.[0]?.title === "rls-tableau"
+  && (await rest(SERVICE, `${members}&select=user_id`)).data?.length === 1
+  && (await rest(SERVICE, `design_board_links?select=token&board_id=eq.${boardId}`)).data?.[0]?.token === linkToken);
+const ownerChange = await patchBoard(A, { owner_id: B.id });
+check("staff A ne peut pas donner son tableau à un autre compte (droit de colonne)", privilegeError(ownerChange), JSON.stringify(ownerChange));
+
+// Lecture par toute l'équipe
+check("staff A ouvre son tableau à toute l'équipe en lecture", (await patchBoard(A, { team_read: true })).data?.[0]?.team_read === true);
+check("staff A retire staff B des membres", (await rest(A.jwt, `${members}&user_id=eq.${B.id}`, { method: "DELETE", prefer: "return=representation" })).data?.length === 1);
+for (const [who, label] of [[B, "staff B (plus membre)"], [superAdmin, "super admin"]]) {
+  const s = await seen(who);
+  check(`${label} lit le tableau ouvert à l'équipe`, s === "1 tableau, 2 image(s)" && (await access(who)) === "read", s);
+}
+check("super admin ne peut pas poser d'image sur un tableau ouvert à l'équipe", refused(await postItem(superAdmin, item(boardId, superAdmin))));
+check("super admin ne peut pas supprimer un tableau ouvert à l'équipe", refused(await rest(superAdmin.jwt, `design_boards?id=eq.${boardId}`, { method: "DELETE", prefer: "return=representation" })));
+check("admin Flexfolio (sans rôle Flexdesign) ne lit pas un tableau ouvert à l'équipe", (await seen(folioAdmin)) === "0 tableau, 0 image(s)");
+check("staff A referme son tableau", (await patchBoard(A, { team_read: false })).data?.[0]?.team_read === false);
+check("super admin ne lit plus le tableau refermé", (await seen(superAdmin)) === "0 tableau, 0 image(s)");
+
+// Équipe Flexdesign
+const anonTeam = await rpc(ANON, "design_team");
+check("visiteur ne peut pas appeler design_team", anonTeam.status >= 400, `${anonTeam.status}`);
+const folioTeam = await rpc(folioAdmin.jwt, "design_team");
+check("admin Flexfolio ne peut pas appeler design_team", folioTeam.status === 403, `${folioTeam.status}`);
+const designTeam = await rpc(A.jwt, "design_team");
+check("staff A lit l'équipe Flexdesign (staff A et staff B compris)", designTeam.status === 200 && [A.id, B.id].every((id) => designTeam.data?.some?.((m) => m.user_id === id)), JSON.stringify(designTeam.status));
+
+// Lien public
+const byToken = (t) => rpc(ANON, "design_board_by_token", { p_token: t });
+const shared = await byToken(linkToken);
+check("visiteur lit le tableau par son lien public (titre et images)", shared.data?.id === boardId && shared.data?.title === "rls-tableau" && shared.data?.items?.length === 2, JSON.stringify(shared.status));
+check("un jeton inconnu ne renvoie rien", (await byToken(randomBytes(32).toString("base64url"))).data === null);
+await rest(SERVICE, `app_roles?user_id=eq.${A.id}&app=eq.flexdesign`, { method: "DELETE" });
+check("le lien ne renvoie plus rien quand le propriétaire a quitté l'équipe Flexdesign", (await byToken(linkToken)).data === null);
+check("staff A sans rôle Flexdesign ne lit plus son propre tableau", (await seen(A)) === "0 tableau, 0 image(s)");
+await grantDesign(A);
+check("le lien fonctionne de nouveau quand le rôle est rendu", (await byToken(linkToken)).data?.id === boardId);
+
+// Stockage privé design-assets : chaque fichier suit les droits de son tableau
+const pngBytes = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex");
+const assetUrl = (path) => `${SB}/storage/v1/object/design-assets/${path}`;
+const uploadAsset = async (bearer, path, type = "image/png") => (await fetch(assetUrl(path), { method: "POST", headers: { apikey: ANON, Authorization: `Bearer ${bearer}`, "Content-Type": type }, body: pngBytes })).status;
+const downloadAsset = async (bearer, path) => (await fetch(`${SB}/storage/v1/object/authenticated/design-assets/${path}`, { headers: { apikey: ANON, Authorization: `Bearer ${bearer}` } })).status;
+const deleteAsset = (bearer, path) => fetch(assetUrl(path), { method: "DELETE", headers: { apikey: ANON, Authorization: `Bearer ${bearer}` } });
+const assetPath = `${boardId}/${randomUUID()}.png`;
+const assetUp = await uploadAsset(A.jwt, assetPath);
+check("staff A envoie une image dans le dossier de son tableau", assetUp === 200, `${assetUp}`);
+check("staff A télécharge son image", (await downloadAsset(A.jwt, assetPath)) === 200);
+let status = await uploadAsset(B.jwt, `${boardId}/${randomUUID()}.png`);
+check("staff B (non membre) ne peut pas envoyer d'image dans le dossier du tableau", status >= 400, `${status}`);
+status = await downloadAsset(B.jwt, assetPath);
+check("staff B (non membre) ne peut pas télécharger une image du tableau", status >= 400, `${status}`);
+status = await downloadAsset(ANON, assetPath);
+check("visiteur ne peut pas télécharger une image du bucket privé", status >= 400, `${status}`);
+await addMember(A, B.id);
+check("staff B en lecture télécharge une image du tableau", (await downloadAsset(B.jwt, assetPath)) === 200);
+status = await uploadAsset(B.jwt, `${boardId}/${randomUUID()}.png`);
+check("staff B en lecture ne peut pas envoyer d'image", status >= 400, `${status}`);
+await deleteAsset(B.jwt, assetPath);
+check("staff B en lecture ne peut pas supprimer une image", (await downloadAsset(A.jwt, assetPath)) === 200);
+status = await uploadAsset(A.jwt, `${boardId}/${randomUUID()}.svg`, "image/svg+xml");
+check("le bucket refuse un fichier image/svg+xml, même pour le propriétaire", status >= 400, `${status}`);
+status = await uploadAsset(A.jwt, `rls-dossier/${randomUUID()}.png`);
+check("image refusée hors du dossier d'un tableau", status >= 400, `${status}`);
+await deleteAsset(A.jwt, assetPath);
+check("staff A supprime son image du stockage", (await downloadAsset(A.jwt, assetPath)) >= 400);
+
 // Nettoyage
 await rest(SERVICE, "sondage_polls?id=like.rls-*", { method: "DELETE" });
 await rest(SERVICE, "projects?slug=like.rls-*", { method: "DELETE" });
@@ -317,7 +486,8 @@ await fetch(`${SB}/storage/v1/object/project-images`, {
 });
 await rest(SERVICE, "design_themes?name=like.rls-*", { method: "DELETE" });
 await rest(SERVICE, "design_fonts?label=like.rls-*", { method: "DELETE" });
-await rest(SERVICE, `app_roles?user_id=eq.${staff.id}&app=eq.flexdesign`, { method: "DELETE" });
+await purgeBoards();
+await rest(SERVICE, `app_roles?user_id=in.(${staff.id},${formAdmin.id})&app=eq.flexdesign`, { method: "DELETE" });
 await fetch(`${SB}/storage/v1/object/design-fonts`, {
   method: "DELETE",
   headers: { apikey: ANON, Authorization: `Bearer ${SERVICE}`, "Content-Type": "application/json" },
