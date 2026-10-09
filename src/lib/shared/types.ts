@@ -17,6 +17,8 @@ export interface Me {
   superAdmin: boolean;
   /** Applis dont le compte est admin (toutes pour un super admin), triées par nom */
   apps: SuiteApp[];
+  /** Accès à /staff : rôle admin ou staff dans Flexform */
+  staffPage: boolean;
 }
 
 /** Membre de l'équipe d'une appli. role "super" : super admin de la suite, défini en SQL, non modifiable ici. */
@@ -65,6 +67,42 @@ export interface ResetPasswordResult {
  * Erreurs : { error: string } avec le code HTTP (401 non connecté, 403 droits, 404, 409 conflit, 429).
  */
 export const MAX_EMAIL_LENGTH = 254;
+
+// --- Page /staff : récompenses et sondages réservés au staff de Flexform (tables sondage_* de Flexform) ---
+
+/** Longueur maximale d'une réponse libre (la même que dans Flexform) */
+export const MAX_ANSWER_LENGTH = 280;
+
+export interface PollOption {
+  id: string;
+  label: string;
+}
+
+/**
+ * POST /api/staff/check { code } : vérifie un code scanné sans le valider.
+ * POST /api/staff/redeem { code } : valide la remise ; un code ne peut être validé qu'une fois.
+ */
+export interface RewardCheck {
+  status: "valid" | "done" | "used" | "invalid";
+  code: string;
+  message?: string;
+  reward?: string;
+  question?: string;
+  person?: { pseudo: string; prenom: string; nom: string; formation: string };
+  redeemedAt?: number | null;
+}
+
+/**
+ * GET /api/staff/polls : sondages réservés au staff et ouverts, avec la réponse du compte connecté.
+ * POST /api/staff/vote { pollId, value } : répond ou change sa réponse (identifiant du choix, ou texte).
+ */
+export interface StaffPoll {
+  id: string;
+  kind: "choice" | "text";
+  question: string;
+  options: PollOption[];
+  myVote: string | null;
+}
 /** Longueur d'un mot de passe choisi (72 : limite de bcrypt, utilisé par Supabase Auth) */
 export const MIN_PASSWORD_LENGTH = 8;
 export const MAX_PASSWORD_LENGTH = 72;

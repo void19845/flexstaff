@@ -7,7 +7,7 @@ Gestion de l'équipe et des droits de **Flex Suite**, les applications qui parta
 | Flexfolio | `void19845/flexfolio` | Portfolio et son administration |
 | Flexform | `void19845/flexform` | Sondages du BDE Montreuil |
 | Flexdesign | `void19845/flexdesign` | Design system, studio de visuels et moodboards (en construction) |
-| Flexstaff | ce dépôt | Ajouter du staff, transmettre le rôle admin, et socle commun de la base |
+| Flexstaff | ce dépôt | Ajouter du staff, transmettre le rôle admin, remise des récompenses de Flexform, et socle commun de la base |
 
 Ce dépôt contient :
 
@@ -15,7 +15,8 @@ Ce dépôt contient :
   `app_roles`. Chaque appli a son propre `supabase/init.sql` dans son dépôt (ses tables, ses règles de
   sécurité, son inscription dans `suite_apps`), qui s'applique après celui-ci ;
 - les scripts de gestion des comptes (`npm run role`) et de test des droits (`npm run test:rls`) ;
-- l'appli Flexstaff : ajouter du staff et transmettre le rôle admin depuis une interface.
+- l'appli Flexstaff : ajouter du staff et transmettre le rôle admin depuis une interface, et la page `/staff`
+  du staff de Flexform (remise des récompenses, sondages réservés au staff).
 
 ## Droits
 
@@ -132,8 +133,10 @@ fichier modifié dans le SQL Editor (celui de flexstaff d'abord s'il a changé).
 
 ## L'appli Flexstaff
 
-Réservée aux admins d'au moins une appli de la suite (un compte staff ou sans rôle est refusé à la
-connexion). Chaque admin ne voit que les applis qu'il administre ; un super admin les voit toutes.
+Connexion ouverte aux admins d'au moins une appli de la suite et aux comptes qui ont un rôle (`admin` ou
+`staff`) dans Flexform ; tout autre compte est refusé à la connexion. La gestion des équipes reste réservée aux
+admins : un compte qui n'est que staff de Flexform ne voit qu'un lien vers `/staff`, et les routes `/api/team*`
+lui répondent 403. Chaque admin ne voit que les applis qu'il administre ; un super admin les voit toutes.
 
 - ajouter un membre par e-mail, en `admin` ou `staff` : un compte qui n'existe pas est créé, avec un mot
   de passe provisoire affiché une seule fois ;
@@ -153,6 +156,27 @@ chaque requête : un admin rétrogradé perd l'accès aussitôt. La clé `servic
 compte ou changer le mot de passe d'un membre (après vérification des droits avec le jeton du compte, fonction
 `suite_password_reset_target` pour le mot de passe) et à limiter les tentatives.
 
+### Page `/staff` : récompenses de Flexform
+
+Reprise de l'ancienne page `/staff` de Flexform, pour les comptes admin ou staff de Flexform (super admins
+compris), vérifiés à chaque requête par la fonction `suite_app_role('flexform')` ; un admin y a aussi un lien
+vers la gestion des équipes, et la page de l'équipe a un lien « Récompenses » pour ces comptes.
+
+- scanner le QR code d'une récompense avec la caméra (`BarcodeDetector` du navigateur, ou `jsqr` sur Safari),
+  ou taper le code à la main : la page affiche la récompense, la personne et le sondage, puis « Valider la
+  remise ». Un code ne peut être validé qu'une fois, même par deux personnes en même temps. Le QR code contient
+  le code seul ; les anciens QR codes, qui contiennent l'adresse de la page staff de Flexform (`?code=`), sont
+  encore lus ;
+- répondre aux sondages réservés au staff (ouverts dans le hub de Flexform), et changer sa réponse tant que le
+  sondage est ouvert.
+
+Flexstaff lit et écrit directement les tables `sondage_*` de Flexform (`sondage_reward_codes`,
+`sondage_polls`, `sondage_participants`, `sondage_staff_votes`) avec le jeton du compte connecté, jamais avec la
+clé `service_role` : ce sont les règles RLS de Flexform (`supabase/init.sql` du dépôt flexform) qui décident
+(le staff ne voit que les personnes qui ont une récompense, ne modifie que `redeemed_at` et `redeemed_by`, ne
+répond qu'en son nom). La caméra est autorisée sur cette page seulement (`Permissions-Policy: camera=(self)`) ;
+il faut une adresse en https (ou localhost) pour y accéder.
+
 ### Lancer
 
 Avec la base locale et le `.env` décrits plus haut :
@@ -171,15 +195,20 @@ Avec l'appli lancée et la base locale :
 node --env-file=.env scripts/app-e2e.mjs http://localhost:8786
 ```
 
-`scripts/app-e2e.mjs` vérifie chaque route (connexion, équipe, ajout, rôles, transmission, mots de passe), dont
-les cas refusés. Il crée puis supprime un compte de test et remet les rôles comme au départ.
+`scripts/app-e2e.mjs` vérifie chaque route (connexion, équipe, ajout, rôles, transmission, mots de passe, page
+`/staff`), dont les cas refusés : un staff Flexform se connecte mais n'accède pas aux équipes ; visiteur (401) et
+compte sans rôle dans Flexform (403, et rien en accès direct à la base) refusés sur chaque route `/api/staff/*` ;
+double validation simultanée d'un code (une seule réussit), code inconnu, choix invalide, sondage normal (404),
+sondage fermé (409). Il crée puis supprime un compte de test et ses propres données dans les tables de Flexform
+(un sondage avec récompense, une personne, un code, un sondage réservé au staff), et remet les rôles comme au
+départ.
 
 ### Variables d'environnement
 
 | Variable | Rôle |
 |---|---|
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Projet Supabase (les noms `NEXT_PUBLIC_*` marchent aussi) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Clé serveur : création de comptes, mot de passe d'un membre et limite de tentatives |
+| `SUPABASE_SERVICE_ROLE_KEY` | Clé serveur : création de comptes, mot de passe d'un membre et limite de tentatives (jamais pour la page `/staff`) |
 | `TEST_*` | Comptes de test, pour `npm run test:rls` et `scripts/app-e2e.mjs` uniquement |
 
 ## Nouvelle appli

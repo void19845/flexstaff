@@ -16,6 +16,11 @@ const nextConfig: NextConfig = {
           { key: "X-Robots-Tag", value: "noindex" },
         ],
       },
+      {
+        // Scanner des QR codes des récompenses
+        source: "/staff",
+        headers: [{ key: "Permissions-Policy", value: "camera=(self)" }],
+      },
     ];
   },
 };

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useEffectEvent, useState } from "react";
 import { AddMemberForm } from "@/components/add-member-form";
 import { OwnPasswordForm } from "@/components/own-password-form";
@@ -18,8 +19,19 @@ export type Run = (action: () => Promise<unknown>, options?: { selfChanged?: boo
 
 const RIGHTS_REMOVED = "Tu n'es plus admin d'aucune appli de la suite : l'accès à Flexstaff est fermé.";
 
-/** Tableau de bord : un onglet par appli administrée, son équipe et le formulaire d'ajout. */
-export function TeamPanel({ account, onSignedOut }: { account: Me; onSignedOut: (message: string) => void }) {
+/**
+ * Tableau de bord : un onglet par appli administrée, son équipe et le formulaire d'ajout.
+ * onNoApps : le compte n'administre plus aucune appli mais garde un rôle dans Flexform (accès à /staff).
+ */
+export function TeamPanel({
+  account,
+  onSignedOut,
+  onNoApps,
+}: {
+  account: Me;
+  onSignedOut: (message: string) => void;
+  onNoApps: (me: Me) => void;
+}) {
   const [me, setMe] = useState(account);
   const [app, setApp] = useState(account.apps[0]?.app ?? "");
   /** Dernière équipe reçue ; elle peut être celle d'un autre onglet le temps du chargement */
@@ -82,7 +94,7 @@ export function TeamPanel({ account, onSignedOut }: { account: Me; onSignedOut: 
       if (err instanceof ApiError && err.status === 403) return signOut(RIGHTS_REMOVED);
       throw err;
     }
-    if (!fresh.apps.length) return signOut(RIGHTS_REMOVED);
+    if (!fresh.apps.length) return fresh.staffPage ? onNoApps(fresh) : signOut(RIGHTS_REMOVED);
     setMe(fresh);
     if (!fresh.apps.some((a) => a.app === app)) {
       const lost = me.apps.find((a) => a.app === app)?.name ?? app;
@@ -125,6 +137,11 @@ export function TeamPanel({ account, onSignedOut }: { account: Me; onSignedOut: 
         <div className="topbar-actions">
           <span className="muted small">{me.email}</span>
           {me.superAdmin && <span className="badge role-super">Super admin</span>}
+          {me.staffPage && (
+            <Link className="btn ghost small" href="/staff">
+              Récompenses
+            </Link>
+          )}
           <button type="button" className="btn ghost small" onClick={() => setOwnPassword(true)}>
             Mon mot de passe
           </button>
