@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useState, type ReactNode } from "react";
 import { AddMemberForm } from "@/components/add-member-form";
 import { OwnPasswordForm } from "@/components/own-password-form";
 import { PasswordNotice, type CreatedAccount } from "@/components/password-notice";
@@ -21,16 +21,18 @@ const RIGHTS_REMOVED = "Tu n'es plus admin d'aucune appli de la suite : l'accès
 
 /**
  * Tableau de bord : un onglet par appli administrée, son équipe et le formulaire d'ajout.
- * onNoApps : le compte n'administre plus aucune appli mais garde un rôle dans Flexform (accès à /staff).
+ * nav : navigation entre les sections de Flexstaff ; onAccountChange : droits du compte relus (/api/auth/me).
  */
 export function TeamPanel({
   account,
+  nav,
+  onAccountChange,
   onSignedOut,
-  onNoApps,
 }: {
   account: Me;
+  nav: ReactNode;
+  onAccountChange: (me: Me) => void;
   onSignedOut: (message: string) => void;
-  onNoApps: (me: Me) => void;
 }) {
   const [me, setMe] = useState(account);
   const [app, setApp] = useState(account.apps[0]?.app ?? "");
@@ -94,8 +96,10 @@ export function TeamPanel({
       if (err instanceof ApiError && err.status === 403) return signOut(RIGHTS_REMOVED);
       throw err;
     }
-    if (!fresh.apps.length) return fresh.staffPage ? onNoApps(fresh) : signOut(RIGHTS_REMOVED);
+    // Plus admin d'aucune appli : reste le calendrier (équipe Flexstaff) ou la remise des récompenses (rôle Flexform)
+    if (!fresh.apps.length) return fresh.flexstaff || fresh.staffPage ? onAccountChange(fresh) : signOut(RIGHTS_REMOVED);
     setMe(fresh);
+    onAccountChange(fresh);
     if (!fresh.apps.some((a) => a.app === app)) {
       const lost = me.apps.find((a) => a.app === app)?.name ?? app;
       flash(`Tu n'es plus admin de ${lost}.`);
@@ -150,6 +154,7 @@ export function TeamPanel({
           </button>
         </div>
       </header>
+      {nav}
       <nav className="tabs" role="tablist" aria-label="Applis de la suite">
         {me.apps.map((a) => (
           <button key={a.app} type="button" className="btn tab" role="tab" aria-selected={a.app === app} onClick={() => setApp(a.app)}>

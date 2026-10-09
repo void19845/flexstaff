@@ -494,6 +494,117 @@ check("image refusée hors du dossier d'un tableau", status >= 400, `${status}`)
 await deleteAsset(A.jwt, assetPath);
 check("staff A supprime son image du stockage", (await downloadAsset(A.jwt, assetPath)) >= 400);
 
+console.log("\n# Flexstaff : calendrier et tâches");
+// Rôles Flexstaff le temps de cette partie (retirés au nettoyage) : staff Flexform = staff Flexstaff,
+// admin Flexform = admin Flexstaff. L'admin Flexfolio reste sans rôle Flexstaff.
+const S = staff;
+const ADM = formAdmin;
+const NOROLE = folioAdmin;
+const grantStaff = (who, role) => rest(SERVICE, "app_roles?on_conflict=user_id,app", { method: "POST", body: { user_id: who.id, app: "flexstaff", role }, prefer: "resolution=merge-duplicates" });
+await rest(SERVICE, "staff_projects?title=like.rls-*", { method: "DELETE" });
+await rest(SERVICE, `app_roles?user_id=in.(${S.id},${ADM.id},${NOROLE.id})&app=eq.flexstaff`, { method: "DELETE" });
+await grantStaff(S, "staff");
+await grantStaff(ADM, "admin");
+check("Flexstaff : staff, admin et sans rôle pour ce test", (await roleOf(S, "flexstaff")) === "staff" && (await roleOf(ADM, "flexstaff")) === "admin" && (await roleOf(NOROLE, "flexstaff")) === null);
+
+const projectBody = (title, dates = {}) => ({
+  title, short_description: "Courte", long_description: "Longue",
+  event_date: "2026-12-10", communication_start: "2026-11-01", ticketing_open: "2026-11-15", ticketing_close: "2026-12-09", ...dates,
+});
+const newProject = (who, body) => rest(who.jwt, "staff_projects", { method: "POST", body, prefer: "return=representation" });
+const created2 = await newProject(ADM, projectBody("rls-evenement"));
+check("admin Flexstaff crée un projet", created2.status === 201, JSON.stringify(created2));
+const projectId = created2.data?.[0]?.id;
+for (const [who, label] of [[{ jwt: ANON }, "visiteur"], [S, "staff Flexstaff"], [NOROLE, "compte sans rôle Flexstaff"]]) {
+  check(`${label} ne peut pas créer de projet`, refused(await newProject(who, projectBody("rls-pirate"))));
+}
+const lateOpen = await newProject(ADM, projectBody("rls-mauvais", { ticketing_open: "2026-12-09", ticketing_close: "2026-11-15" }));
+check("projet refusé quand la billetterie ouvre après sa fermeture", lateOpen.status === 400 && lateOpen.data?.code === "23514", JSON.stringify(lateOpen));
+const lateCom = await newProject(ADM, projectBody("rls-mauvais", { communication_start: "2026-12-11" }));
+check("projet refusé quand la communication commence après l'événement", lateCom.status === 400 && lateCom.data?.code === "23514", JSON.stringify(lateCom));
+const noDate = await newProject(ADM, projectBody("rls-mauvais", { event_date: null }));
+check("projet refusé sans date d'événement", noDate.status === 400 && noDate.data?.code === "23502", JSON.stringify(noDate));
+const noShort = await newProject(ADM, projectBody("rls-mauvais", { short_description: "" }));
+check("projet refusé sans description courte", noShort.status === 400 && noShort.data?.code === "23514", JSON.stringify(noShort));
+
+const patchProject = (who, body) => rest(who.jwt, `staff_projects?id=eq.${projectId}`, { method: "PATCH", body, prefer: "return=representation" });
+check("staff Flexstaff lit le projet", (await rest(S.jwt, `staff_projects?select=id&id=eq.${projectId}`)).data?.length === 1);
+check("staff Flexstaff ne peut pas modifier un projet", refused(await patchProject(S, { title: "rls-piraté" })));
+check("staff Flexstaff ne peut pas supprimer un projet", refused(await rest(S.jwt, `staff_projects?id=eq.${projectId}`, { method: "DELETE", prefer: "return=representation" })));
+check("compte sans rôle Flexstaff ne peut pas modifier un projet", refused(await patchProject(NOROLE, { title: "rls-piraté" })));
+check("admin Flexstaff modifie un projet", (await patchProject(ADM, { short_description: "Modifiée" })).data?.[0]?.short_description === "Modifiée");
+check("super admin modifie un projet", (await patchProject(superAdmin, { long_description: "Par le super admin" })).data?.[0]?.long_description === "Par le super admin");
+const badPatch = await patchProject(ADM, { ticketing_open: "2027-01-01" });
+check("modification refusée quand la billetterie ouvrirait après sa fermeture", badPatch.status === 400 && badPatch.data?.code === "23514", JSON.stringify(badPatch));
+check("admin Flexstaff ne peut pas changer la date de création d'un projet (droit de colonne)", privilegeError(await patchProject(ADM, { created_at: "2020-01-01T00:00:00Z" })));
+
+const newTask = (who, title) => rest(who.jwt, "staff_tasks", { method: "POST", body: { project_id: projectId, title }, prefer: "return=representation" });
+const t1 = await newTask(S, "rls-tache-staff");
+check("staff Flexstaff ajoute une tâche", t1.status === 201, JSON.stringify(t1));
+const task1 = t1.data?.[0]?.id;
+const task2 = (await newTask(ADM, "rls-tache-admin")).data?.[0]?.id;
+check("admin Flexstaff ajoute une tâche", Boolean(task2));
+check("compte sans rôle Flexstaff ne peut pas ajouter de tâche", refused(await newTask(NOROLE, "rls-pirate")));
+check("visiteur ne peut pas ajouter de tâche", refused(await newTask({ jwt: ANON }, "rls-pirate")));
+
+const assign = (who, taskId, userId) => rest(who.jwt, "staff_task_assignees", { method: "POST", body: { task_id: taskId, user_id: userId }, prefer: "return=representation" });
+const unassign = (who, taskId, userId) => rest(who.jwt, `staff_task_assignees?task_id=eq.${taskId}&user_id=eq.${userId}`, { method: "DELETE", prefer: "return=representation" });
+check("staff Flexstaff s'inscrit sur une tâche", (await assign(S, task1, S.id)).status === 201);
+check("staff Flexstaff ne peut pas inscrire quelqu'un d'autre", refused(await assign(S, task2, ADM.id)));
+check("admin Flexstaff inscrit un membre de l'équipe", (await assign(ADM, task2, ADM.id)).status === 201 && (await assign(ADM, task1, ADM.id)).status === 201);
+check("admin Flexstaff inscrit un super admin (membre de toutes les équipes)", (await assign(ADM, task2, superAdmin.id)).status === 201);
+check("admin Flexstaff ne peut pas inscrire un compte hors de l'équipe", refused(await assign(ADM, task2, NOROLE.id)));
+check("compte sans rôle Flexstaff ne peut pas s'inscrire", refused(await assign(NOROLE, task1, NOROLE.id)));
+check("staff Flexstaff ne peut pas modifier une inscription (aucun droit de mise à jour)", (await rest(S.jwt, `staff_task_assignees?task_id=eq.${task1}&user_id=eq.${S.id}`, { method: "PATCH", body: { user_id: ADM.id } })).status >= 400);
+
+const patchTask = (who, id, body) => rest(who.jwt, `staff_tasks?id=eq.${id}`, { method: "PATCH", body, prefer: "return=representation" });
+check("staff Flexstaff inscrit coche sa tâche", (await patchTask(S, task1, { done: true })).data?.[0]?.done === true);
+check("staff Flexstaff inscrit décoche sa tâche", (await patchTask(S, task1, { done: false })).data?.[0]?.done === false);
+check("staff Flexstaff ne peut pas cocher une tâche où il n'est pas inscrit", refused(await patchTask(S, task2, { done: true })));
+const renamed = await patchTask(S, task1, { title: "rls-piraté" });
+check("staff Flexstaff ne peut pas renommer une tâche, même la sienne", renamed.status === 403 && renamed.data?.code === "PT403", JSON.stringify(renamed));
+const renamedDone = await patchTask(S, task1, { done: true, due_date: "2026-12-01" });
+check("staff Flexstaff ne peut pas changer l'échéance en cochant", renamedDone.status === 403, JSON.stringify(renamedDone));
+check("staff Flexstaff ne peut pas déplacer une tâche vers un autre projet (droit de colonne)", privilegeError(await patchTask(S, task1, { project_id: projectId })));
+check("staff Flexstaff ne peut pas supprimer une tâche, même la sienne", refused(await rest(S.jwt, `staff_tasks?id=eq.${task1}`, { method: "DELETE", prefer: "return=representation" })));
+check("la tâche du staff est intacte", (await rest(SERVICE, `staff_tasks?select=title,done,due_date&id=eq.${task1}`)).data?.[0]?.title === "rls-tache-staff");
+const adminEdit = await patchTask(ADM, task1, { title: "rls-tache-renommee", description: "Détails", due_date: "2026-12-01" });
+check("admin Flexstaff modifie une tâche", adminEdit.data?.[0]?.title === "rls-tache-renommee" && adminEdit.data?.[0]?.due_date === "2026-12-01", JSON.stringify(adminEdit));
+check("admin Flexstaff coche une tâche", (await patchTask(ADM, task2, { done: true })).data?.[0]?.done === true);
+check("compte sans rôle Flexstaff ne peut pas cocher une tâche", refused(await patchTask(NOROLE, task2, { done: false })));
+
+const team2 = await rpc(S.jwt, "staff_team");
+check("staff Flexstaff lit l'équipe Flexstaff avec les e-mails", team2.status === 200 && [S.id, ADM.id, superAdmin.id].every((id) => team2.data?.some?.((m) => m.user_id === id && m.email)), JSON.stringify(team2.status));
+check("l'équipe Flexstaff ne contient pas les comptes sans rôle", team2.data?.every?.((m) => m.user_id !== NOROLE.id));
+check("compte sans rôle Flexstaff ne peut pas appeler staff_team", (await rpc(NOROLE.jwt, "staff_team")).status === 403);
+check("visiteur ne peut pas appeler staff_team", (await rpc(ANON, "staff_team")).status >= 400);
+
+check("staff Flexstaff ne peut pas retirer quelqu'un d'autre d'une tâche", refused(await unassign(S, task1, ADM.id)));
+check("staff Flexstaff se retire d'une tâche", (await unassign(S, task1, S.id)).data?.length === 1);
+check("staff Flexstaff ne peut plus cocher la tâche qu'il a quittée", refused(await patchTask(S, task1, { done: true })));
+check("admin Flexstaff retire quelqu'un d'une tâche", (await unassign(ADM, task2, superAdmin.id)).data?.length === 1);
+
+for (const [who, label] of [[{ jwt: ANON }, "visiteur"], [NOROLE, "compte sans rôle Flexstaff"]]) {
+  for (const table of ["staff_projects", "staff_tasks", "staff_task_assignees"]) {
+    check(`${label} ne lit rien dans ${table}`, refused(await rest(who.jwt, `${table}?select=*`)));
+  }
+}
+check("compte sans rôle Flexstaff ne peut pas supprimer de tâche", refused(await rest(NOROLE.jwt, `staff_tasks?id=eq.${task2}`, { method: "DELETE", prefer: "return=representation" })));
+
+// Rôle retiré : plus aucun accès, et l'ancien membre reste nommé sur ses tâches
+await assign(S, task1, S.id);
+await rest(SERVICE, `app_roles?user_id=eq.${S.id}&app=eq.flexstaff`, { method: "DELETE" });
+check("staff dont le rôle Flexstaff est retiré ne lit plus rien", (await rest(S.jwt, "staff_projects?select=id")).data?.length === 0 && (await rest(S.jwt, "staff_tasks?select=id")).data?.length === 0);
+check("staff dont le rôle Flexstaff est retiré ne peut plus cocher sa tâche", refused(await patchTask(S, task1, { done: true })));
+const formerTeam = (await rpc(ADM.jwt, "staff_team")).data;
+check("un ancien membre encore inscrit apparaît dans staff_team sans rôle", formerTeam?.some?.((m) => m.user_id === S.id && m.role === null), JSON.stringify(formerTeam?.length));
+
+check("admin Flexstaff supprime une tâche", (await rest(ADM.jwt, `staff_tasks?id=eq.${task2}`, { method: "DELETE", prefer: "return=representation" })).data?.length === 1);
+check("supprimer la tâche efface ses inscriptions", (await rest(SERVICE, `staff_task_assignees?select=user_id&task_id=eq.${task2}`)).data.length === 0);
+check("admin Flexstaff supprime un projet", (await rest(ADM.jwt, `staff_projects?id=eq.${projectId}`, { method: "DELETE", prefer: "return=representation" })).data?.length === 1);
+check("supprimer le projet efface ses tâches et inscriptions", (await rest(SERVICE, `staff_tasks?select=id&project_id=eq.${projectId}`)).data.length === 0
+  && (await rest(SERVICE, `staff_task_assignees?select=user_id&task_id=eq.${task1}`)).data.length === 0);
+
 // Nettoyage
 await rest(SERVICE, "sondage_polls?id=like.rls-*", { method: "DELETE" });
 await rest(SERVICE, "projects?slug=like.rls-*", { method: "DELETE" });
@@ -507,6 +618,8 @@ await rest(SERVICE, "design_themes?name=like.rls-*", { method: "DELETE" });
 await rest(SERVICE, "design_fonts?label=like.rls-*", { method: "DELETE" });
 await purgeBoards();
 await rest(SERVICE, `app_roles?user_id=in.(${staff.id},${formAdmin.id})&app=eq.flexdesign`, { method: "DELETE" });
+await rest(SERVICE, "staff_projects?title=like.rls-*", { method: "DELETE" });
+await rest(SERVICE, `app_roles?user_id=in.(${staff.id},${formAdmin.id},${folioAdmin.id})&app=eq.flexstaff`, { method: "DELETE" });
 await fetch(`${SB}/storage/v1/object/design-fonts`, {
   method: "DELETE",
   headers: { apikey: ANON, Authorization: `Bearer ${SERVICE}`, "Content-Type": "application/json" },

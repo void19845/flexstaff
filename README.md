@@ -7,7 +7,7 @@ Gestion de l'équipe et des droits de **Flex Suite**, les applications qui parta
 | Flexfolio | `void19845/flexfolio` | Portfolio et son administration |
 | Flexform | `void19845/flexform` | Sondages du BDE Montreuil |
 | Flexdesign | `void19845/flexdesign` | Design system, studio de visuels et moodboards (en construction) |
-| Flexstaff | ce dépôt | Ajouter du staff, transmettre le rôle admin, remise des récompenses de Flexform, et socle commun de la base |
+| Flexstaff | ce dépôt | Ajouter du staff, transmettre le rôle admin, remise des récompenses de Flexform, calendrier des événements de l'équipe, et socle commun de la base |
 
 Ce dépôt contient :
 
@@ -15,8 +15,9 @@ Ce dépôt contient :
   `app_roles`. Chaque appli a son propre `supabase/init.sql` dans son dépôt (ses tables, ses règles de
   sécurité, son inscription dans `suite_apps`), qui s'applique après celui-ci ;
 - les scripts de gestion des comptes (`npm run role`) et de test des droits (`npm run test:rls`) ;
-- l'appli Flexstaff : ajouter du staff et transmettre le rôle admin depuis une interface, et la page `/staff`
-  du staff de Flexform (remise des récompenses, sondages réservés au staff).
+- l'appli Flexstaff : ajouter du staff et transmettre le rôle admin depuis une interface, la page `/staff`
+  du staff de Flexform (remise des récompenses, sondages réservés au staff), et le calendrier des événements de
+  l'équipe Flexstaff avec les tâches de chaque projet (tables `staff_*`, en fin de `supabase/init.sql`).
 
 ## Droits
 
@@ -41,6 +42,18 @@ tant qu'ils ont un rôle Flexdesign. Être admin de Flexdesign ou super admin ne
 des autres. Le propriétaire seul gère le titre, le partage, le lien public et la suppression ; les membres en
 modification gèrent les images. Le lien public passe par `design_board_by_token` (visiteurs compris).
 
+Calendrier de Flexstaff (`staff_projects`, `staff_tasks`, `staff_task_assignees`, fonction `staff_team`, fin de
+`supabase/init.sql`) : Flexstaff est inscrite dans `suite_apps` (`flexstaff`) et a donc sa propre équipe (rôles
+`admin` et `staff` dans `app_roles`, plus les super admins). Tout est lisible par cette équipe, et par personne
+d'autre (visiteurs, comptes sans rôle Flexstaff, rôles dans d'autres applis seulement). Les admins Flexstaff
+créent, modifient et suppriment les projets et les tâches, et inscrivent ou retirent n'importe quel membre de
+l'équipe sur une tâche. Le staff ajoute des tâches, s'inscrit sur une tâche et s'en retire (lui seulement). Les
+personnes inscrites sur une tâche (et les admins) la cochent ou la décochent : c'est la seule colonne que le staff
+peut changer (droits de colonnes et garde `staff_tasks_guard`). On n'inscrit qu'un membre de l'équipe. La base
+refuse un projet dont la billetterie ouvre après sa fermeture, ou dont la communication commence après
+l'événement. `staff_team()` donne les e-mails de l'équipe (et des anciens membres encore inscrits sur une tâche,
+sans rôle) sans ouvrir `auth.users`.
+
 ## Mettre en place la base de production
 
 1. Dans le SQL Editor de Supabase, exécuter dans cet ordre : `supabase/init.sql` de ce dépôt, puis
@@ -62,6 +75,7 @@ modification gèrent les images. Le lien public passe par `design_board_by_token
 ```bash
 npm install
 npm run role -- prenom.nom@exemple.fr flexform staff
+npm run role -- prenom.nom@exemple.fr flexstaff staff
 ```
 
 `admin` pour un admin, `remove` pour retirer le rôle (le compte Supabase est conservé). Un compte qui
@@ -117,6 +131,13 @@ aux autres (super admin compris) tant qu'il n'est pas partagé, membre en lectur
 modification limité aux images (colonnes autorisées, fichier dans le dossier du tableau), partage, lien et
 réglages réservés au propriétaire, lien public coupé quand le propriétaire quitte l'équipe, fichiers de
 `design-assets` soumis aux mêmes droits (SVG et dossiers hors tableau refusés).
+Pour le calendrier de Flexstaff, il donne au staff Flexform un rôle staff Flexstaff et à l'admin Flexform un rôle
+admin Flexstaff (retirés à la fin ; l'admin Flexfolio reste sans rôle) et vérifie : rien de lisible ni d'écrivable
+pour les visiteurs et les comptes sans rôle Flexstaff ; projets créés, modifiés et supprimés par les admins
+seulement ; tâches ajoutées par toute l'équipe, modifiées et supprimées par les admins seulement ; inscription
+de soi-même par le staff, d'un autre membre par les admins, jamais d'un compte hors de l'équipe ; cochage réservé
+aux personnes inscrites et aux admins, sans pouvoir changer une autre colonne ; dates incohérentes refusées ;
+accès coupé dès que le rôle est retiré ; suppression en cascade.
 Il refuse de tourner sur une autre base que la base locale. `npm run db:reset` repart d'une base vide,
 `npm run db:setup` applique les fichiers à la base en place sans rien effacer : dans les deux cas
 `supabase/init.sql` de ce dépôt puis celui de flexfolio, flexform et flexdesign, lus dans les dépôts clonés
@@ -133,10 +154,24 @@ fichier modifié dans le SQL Editor (celui de flexstaff d'abord s'il a changé).
 
 ## L'appli Flexstaff
 
-Connexion ouverte aux admins d'au moins une appli de la suite et aux comptes qui ont un rôle (`admin` ou
-`staff`) dans Flexform ; tout autre compte est refusé à la connexion. La gestion des équipes reste réservée aux
-admins : un compte qui n'est que staff de Flexform ne voit qu'un lien vers `/staff`, et les routes `/api/team*`
-lui répondent 403. Chaque admin ne voit que les applis qu'il administre ; un super admin les voit toutes.
+Connexion ouverte aux admins d'au moins une appli de la suite, aux comptes qui ont un rôle (`admin` ou `staff`)
+dans Flexform et à l'équipe Flexstaff (rôle `admin` ou `staff` dans l'appli `flexstaff`, ou super admin) ; tout
+autre compte est refusé à la connexion. Un compte qui n'est que staff de Flexform ne voit qu'un lien vers
+`/staff`. Deux sections, avec une navigation quand le compte a accès aux deux :
+
+**Calendrier** (équipe Flexstaff) : un projet par événement, avec un titre, une description courte et une longue,
+la date de l'événement, le début de la communication et l'ouverture et la fermeture de la billetterie (dates
+sans heure, toutes obligatoires). Le calendrier montre le mois (précédent, suivant, aujourd'hui) avec chaque
+projet le jour de son événement et des repères pour la communication et la billetterie ; sur téléphone, une
+liste des jours du mois remplace la grille. Un projet s'ouvre sur sa page : informations, tâches (titre,
+description et échéance facultatives) avec les personnes inscrites. Chacun peut ajouter une tâche, s'inscrire
+(« Je m'en charge ») et se retirer ; les personnes inscrites cochent la tâche une fois faite. Les admins Flexstaff
+créent, modifient et suppriment les projets et les tâches, et inscrivent ou retirent les membres de l'équipe.
+Le serveur relit le rôle Flexstaff dans la base à chaque requête (`suite_app_role('flexstaff')`) et agit avec le
+jeton du compte : la base applique les règles décrites plus haut.
+
+**Équipe** (admins d'au moins une appli ; les routes `/api/team*` répondent 403 aux autres) : chaque admin ne voit que les applis qu'il administre ; un super admin
+les voit toutes. Les admins Flexstaff y gèrent l'équipe Flexstaff (onglet Flexstaff).
 
 - ajouter un membre par e-mail, en `admin` ou `staff` : un compte qui n'existe pas est créé, avec un mot
   de passe provisoire affiché une seule fois ;
@@ -196,12 +231,12 @@ node --env-file=.env scripts/app-e2e.mjs http://localhost:8786
 ```
 
 `scripts/app-e2e.mjs` vérifie chaque route (connexion, équipe, ajout, rôles, transmission, mots de passe, page
-`/staff`), dont les cas refusés : un staff Flexform se connecte mais n'accède pas aux équipes ; visiteur (401) et
+`/staff`, calendrier : projets, tâches, inscriptions), dont les cas refusés : un staff Flexform se connecte mais n'accède pas aux équipes ; visiteur (401) et
 compte sans rôle dans Flexform (403, et rien en accès direct à la base) refusés sur chaque route `/api/staff/*` ;
 double validation simultanée d'un code (une seule réussit), code inconnu, choix invalide, sondage normal (404),
 sondage fermé (409). Il crée puis supprime un compte de test et ses propres données dans les tables de Flexform
-(un sondage avec récompense, une personne, un code, un sondage réservé au staff), et remet les rôles comme au
-départ.
+(un sondage avec récompense, une personne, un code, un sondage réservé au staff), donne des rôles Flexstaff aux
+comptes de test le temps du calendrier, et remet les rôles comme au départ.
 
 ### Variables d'environnement
 

@@ -229,6 +229,100 @@ await superAdmin("/api/team/role", { method: "POST", body: { app: "flexform", us
 await superAdmin("/api/team/role", { method: "POST", body: { app: "flexform", userId: staffId, role: "staff" } });
 check("retirer l'accès", (await superAdmin("/api/team/role", { method: "POST", body: { app: "flexform", userId: newId, role: null } })).status === 200 &&
   roleIn(await superAdmin("/api/team?app=flexform"), NEW_EMAIL) === undefined);
+console.log("\n# Calendrier (Flexstaff)");
+// Rôles Flexstaff le temps de cette partie (retirés à la fin) : staff Flexform = staff Flexstaff, admin Flexform = admin Flexstaff.
+// L'admin Flexfolio reste sans rôle Flexstaff.
+const serviceRest = (path, init = {}) => admin(`/rest/v1/${path}`, init);
+const flexstaffRoles = `app_roles?app=eq.flexstaff&user_id=in.(${staffId},${formAdminId})`;
+await serviceRest("staff_projects?title=like.e2e-*", { method: "DELETE" });
+await serviceRest("app_roles?on_conflict=user_id,app", {
+  method: "POST",
+  headers: { Prefer: "resolution=merge-duplicates" },
+  body: JSON.stringify([{ user_id: staffId, app: "flexstaff", role: "staff" }, { user_id: formAdminId, app: "flexstaff", role: "admin" }]),
+});
+// Les connexions sont limitées à 10 par minute et ce test en a déjà fait beaucoup
+await serviceRest("suite_rate_limits?key=like.flexstaff:login:*", { method: "DELETE" });
+try {
+  const { users } = await (await admin("/auth/v1/admin/users?per_page=200")).json();
+  const folioId = users.find((u) => u.email === env.TEST_FOLIO_EMAIL)?.id;
+  const projects = (who, method, body) => who("/api/projects", { method, body });
+  const tasks = (who, method, body) => who("/api/tasks", { method, body });
+  const assignees = (who, method, body) => who("/api/tasks/assignees", { method, body });
+  const fields = (extra = {}) => ({
+    title: "e2e-evenement", shortDescription: "Soirée", longDescription: "Soirée de rentrée du BDE.",
+    eventDate: "2026-12-10", communicationStart: "2026-11-01", ticketingOpen: "2026-11-15", ticketingClose: "2026-12-09", ...extra,
+  });
+
+  check("sans connexion : calendrier refusé (401)", (await browser()("/api/projects")).status === 401);
+  check("compte sans rôle Flexstaff (admin Flexfolio) : calendrier refusé (403)", (await folioAdmin("/api/projects")).status === 403);
+  const s1 = await login(staff, env.TEST_STAFF_EMAIL, env.TEST_STAFF_PASSWORD);
+  check("un staff Flexstaff (admin d'aucune appli) se connecte", s1.status === 200 && s1.data.flexstaff === "staff" && s1.data.apps?.length === 0, JSON.stringify(s1.data));
+  check("le staff Flexstaff ne peut pas lire une équipe (/api/team)", (await staff("/api/team?app=flexform")).status === 403);
+  check("le staff Flexstaff ne peut pas ajouter de membre", (await staff("/api/team", { method: "POST", body: { app: "flexstaff", email: NEW_EMAIL, role: "staff" } })).status === 403);
+  const adminMe = (await formAdmin("/api/auth/me")).data;
+  check("l'admin Flexstaff gère l'équipe Flexstaff", adminMe.flexstaff === "admin" && adminMe.apps?.some((a) => a.app === "flexstaff"), JSON.stringify(adminMe));
+  check("l'équipe Flexstaff liste le staff", roleIn(await formAdmin("/api/team?app=flexstaff"), env.TEST_STAFF_EMAIL) === "staff");
+
+  for (const [extra, label] of [
+    [{ ticketingOpen: "2026-12-09", ticketingClose: "2026-11-15" }, "billetterie qui ouvre après sa fermeture"],
+    [{ communicationStart: "2026-12-11" }, "communication qui commence après l'événement"],
+    [{ shortDescription: " " }, "description courte vide"],
+    [{ eventDate: "2026-02-30" }, "date qui n'existe pas"],
+    [{ ticketingClose: undefined }, "date manquante"],
+  ]) {
+    const r = await projects(formAdmin, "POST", fields(extra));
+    check(`projet refusé : ${label} (400)`, r.status === 400, JSON.stringify(r));
+  }
+  const p = await projects(formAdmin, "POST", fields());
+  check("l'admin Flexstaff crée un projet", p.status === 200 && typeof p.data.id === "string", JSON.stringify(p));
+  const projectId = p.data.id;
+  check("le staff Flexstaff ne peut pas créer de projet (403)", (await projects(staff, "POST", fields({ title: "e2e-pirate" }))).status === 403);
+  check("le staff Flexstaff ne peut pas modifier un projet (403)", (await projects(staff, "PATCH", fields({ id: projectId, title: "e2e-pirate" }))).status === 403);
+  check("le staff Flexstaff ne peut pas supprimer un projet (403)", (await projects(staff, "DELETE", { id: projectId })).status === 403);
+  const plan = await staff("/api/projects");
+  check("le staff Flexstaff voit le projet dans le calendrier", plan.status === 200 && plan.data.role === "staff" && plan.data.projects?.some((x) => x.id === projectId && x.eventDate === "2026-12-10"), JSON.stringify(plan.status));
+  check("projet inconnu : 404", (await staff("/api/projects?id=00000000-0000-0000-0000-000000000000")).status === 404);
+  check("identifiant de projet invalide : 400", (await staff("/api/projects?id=pas-un-id")).status === 400);
+
+  const t = await tasks(staff, "POST", { projectId, title: "e2e-affiches", description: "Imprimer 50 affiches", dueDate: "2026-11-20" });
+  check("le staff Flexstaff ajoute une tâche", t.status === 200 && typeof t.data.id === "string", JSON.stringify(t));
+  const taskId = t.data.id;
+  check("compte sans rôle Flexstaff ne peut pas ajouter de tâche (403)", (await tasks(folioAdmin, "POST", { projectId, title: "e2e-pirate" })).status === 403);
+  check("tâche refusée sans titre (400)", (await tasks(staff, "POST", { projectId, title: "" })).status === 400);
+  check("le staff Flexstaff ne peut pas renommer une tâche (403)", (await tasks(staff, "PATCH", { id: taskId, title: "e2e-pirate" })).status === 403);
+  check("le staff Flexstaff ne peut pas cocher une tâche où il n'est pas inscrit (403)", (await tasks(staff, "PATCH", { id: taskId, done: true })).status === 403);
+  check("le staff Flexstaff s'inscrit sur la tâche", (await assignees(staff, "POST", { taskId })).status === 200);
+  check("s'inscrire deux fois ne change rien", (await assignees(staff, "POST", { taskId })).status === 200);
+  check("le staff Flexstaff inscrit coche la tâche", (await tasks(staff, "PATCH", { id: taskId, done: true })).status === 200);
+  check("le staff Flexstaff ne peut pas inscrire quelqu'un d'autre (403)", (await assignees(staff, "POST", { taskId, userId: formAdminId })).status === 403);
+  check("le staff Flexstaff ne peut pas supprimer une tâche (403)", (await tasks(staff, "DELETE", { id: taskId })).status === 403);
+  check("l'admin Flexstaff ne peut pas inscrire un compte hors de l'équipe (400)", (await assignees(formAdmin, "POST", { taskId, userId: folioId })).status === 400);
+  check("l'admin Flexstaff inscrit un membre", (await assignees(formAdmin, "POST", { taskId, userId: formAdminId })).status === 200);
+  check("le staff Flexstaff ne peut pas retirer quelqu'un d'autre (403)", (await assignees(staff, "DELETE", { taskId, userId: formAdminId })).status === 403);
+  const detail = await staff(`/api/projects?id=${projectId}`);
+  const task = detail.data.tasks?.find((x) => x.id === taskId);
+  check("la page du projet : tâche faite, deux inscrits, e-mails de l'équipe",
+    detail.status === 200 && task?.done === true && task.assignees.length === 2 && task.assignees.includes(detail.data.me)
+      && detail.data.members?.some((m) => m.userId === formAdminId && m.email === env.TEST_ADMIN_EMAIL) && detail.data.project.tasksDone === 1, JSON.stringify(detail.data));
+  check("le staff Flexstaff se retire de la tâche", (await assignees(staff, "DELETE", { taskId })).status === 200);
+  check("le staff Flexstaff ne peut plus décocher la tâche qu'il a quittée (403)", (await tasks(staff, "PATCH", { id: taskId, done: false })).status === 403);
+  check("l'admin Flexstaff modifie la tâche", (await tasks(formAdmin, "PATCH", { id: taskId, title: "e2e-affiches-a3", dueDate: null, done: false })).status === 200);
+  check("l'admin Flexstaff retire quelqu'un d'une tâche", (await assignees(formAdmin, "DELETE", { taskId, userId: formAdminId })).status === 200);
+  check("l'admin Flexstaff modifie le projet", (await projects(formAdmin, "PATCH", fields({ id: projectId, title: "e2e-evenement-2" }))).status === 200
+    && (await staff(`/api/projects?id=${projectId}`)).data.project?.title === "e2e-evenement-2");
+  check("l'admin Flexstaff supprime une tâche", (await tasks(formAdmin, "DELETE", { id: taskId })).status === 200);
+  check("l'admin Flexstaff supprime le projet", (await projects(formAdmin, "DELETE", { id: projectId })).status === 200 && (await staff(`/api/projects?id=${projectId}`)).status === 404);
+
+  await serviceRest(`app_roles?app=eq.flexstaff&user_id=eq.${staffId}`, { method: "DELETE" });
+  // Le compte garde son rôle staff dans Flexform : il reste connecté, pour /staff seulement
+  const afterRemoval = await staff("/api/auth/me");
+  check("rôle Flexstaff retiré : le calendrier est coupé aussitôt, /staff reste ouvert", (await staff("/api/projects")).status === 403
+    && afterRemoval.status === 200 && afterRemoval.data.flexstaff === null && afterRemoval.data.staffPage === true, JSON.stringify(afterRemoval.data));
+} finally {
+  await serviceRest("staff_projects?title=like.e2e-*", { method: "DELETE" });
+  await serviceRest(flexstaffRoles, { method: "DELETE" });
+}
+
 check("déconnexion", (await superAdmin("/api/auth/logout", { method: "POST" })).status === 200 && (await superAdmin("/api/team?app=flexform")).status === 401);
 
 await deleteUser(NEW_EMAIL);
