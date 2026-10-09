@@ -1,7 +1,10 @@
 import { HttpError, json, readJson, route, signIn, str } from "@/lib/server/http";
 import { MAX_EMAIL_LENGTH, type Me } from "@/lib/shared/types";
 
-/** Connexion d'un admin de la suite : { email, password } -> Me. Refusée sans cookie si le compte n'administre aucune appli. */
+/**
+ * Connexion d'un admin de la suite ou d'un membre du staff de Flexform : { email, password } -> Me.
+ * Refusée sans cookie si le compte n'administre aucune appli et n'a pas de rôle dans Flexform.
+ */
 export const POST = route(async (req) => {
   const body = await readJson(req);
   const email = str(body.email);

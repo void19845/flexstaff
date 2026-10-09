@@ -2,7 +2,7 @@ import "server-only";
 
 import { HttpError } from "./errors";
 import { Db, dbErrorToHttp, serviceDb, supabaseConfig, userDb } from "./supabase";
-import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, type SuiteApp } from "@/lib/shared/types";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, type Me, type Role, type SuiteApp } from "@/lib/shared/types";
 
 export { HttpError };
 
@@ -88,13 +88,22 @@ export async function rateLimit(req: Request, bucket: string, max: number, windo
 
 // --- Comptes (Supabase Auth) ----------------------------------------------
 
-export interface AdminContext {
+/** Compte connecté */
+interface SessionContext {
   /** Accès à la base avec le jeton du compte : la RLS et les fonctions de la base décident */
   db: Db;
   userId: string;
   email: string;
+}
+
+export interface AdminContext extends SessionContext {
   /** Applis dont le compte est admin (toutes pour un super admin) */
   apps: SuiteApp[];
+}
+
+/** Compte avec un rôle dans Flexform (admin, super admin compris, ou staff) : accès à /staff */
+export interface FlexformStaffContext extends SessionContext {
+  role: Role;
 }
 
 interface Tokens {
@@ -133,18 +142,31 @@ async function adminApps(db: Db): Promise<SuiteApp[]> {
   return db.rpc<SuiteApp[]>("suite_my_apps");
 }
 
-const NO_ACCESS = "Flexstaff est réservé aux admins d'une appli de la suite.";
+/** Rôle du compte du jeton dans Flexform, lu dans la base (fonction suite_app_role ; super admin : admin). */
+async function flexformRole(db: Db): Promise<Role | null> {
+  const role = await db.rpc<string | null>("suite_app_role", { p_app: "flexform" });
+  return role === "admin" || role === "staff" ? role : null;
+}
 
-/** Connexion. Refusée (sans cookie) si le compte n'est admin d'aucune appli. */
-export async function signIn(req: Request, email: string, password: string): Promise<{ email: string; apps: SuiteApp[]; superAdmin: boolean }> {
+/** Ce que le compte du jeton peut faire dans Flexstaff : applis administrées, page /staff. */
+async function accountOf(db: Db, email: string): Promise<Me> {
+  const [apps, superAdmin, role] = await Promise.all([adminApps(db), db.rpc<boolean>("suite_is_super_admin"), flexformRole(db)]);
+  return { email, superAdmin, apps, staffPage: role !== null };
+}
+
+const NO_ACCESS = "Flexstaff est réservé aux admins d'une appli de la suite et au staff de Flexform.";
+const ADMIN_ONLY = "La gestion des équipes est réservée aux admins d'une appli de la suite.";
+const NO_STAFF_ROLE = "Ce compte n'a pas de rôle admin ou staff dans Flexform.";
+
+/** Connexion. Refusée (sans cookie) si le compte n'est admin d'aucune appli et n'a pas de rôle dans Flexform. */
+export async function signIn(req: Request, email: string, password: string): Promise<Me> {
   await rateLimit(req, "login", 10);
   const tokens = await authRequest("password", { email, password });
   if (!tokens) throw new HttpError(401, "E-mail ou mot de passe incorrect");
-  const db = userDb(tokens.access_token);
-  const [apps, superAdmin] = await Promise.all([adminApps(db), db.rpc<boolean>("suite_is_super_admin")]);
-  if (!apps.length) throw new HttpError(403, NO_ACCESS);
+  const me = await accountOf(userDb(tokens.access_token), jwtPayload(tokens.access_token).email ?? email);
+  if (!me.apps.length && !me.staffPage) throw new HttpError(403, NO_ACCESS);
   setTokens(req, tokens);
-  return { email: jwtPayload(tokens.access_token).email ?? email, apps, superAdmin };
+  return me;
 }
 
 export function signOut(req: Request): void {
@@ -192,12 +214,8 @@ export async function changePassword(req: Request, ctx: AdminContext, current: u
   setTokens(req, tokens);
 }
 
-/**
- * Compte connecté, admin d'au moins une appli. Le jeton est rafraîchi s'il expire bientôt.
- * Les droits sont relus dans la base à chaque requête : un rôle retiré coupe l'accès aussitôt.
- * Le droit sur une appli précise est vérifié par la base elle-même (fonctions et RLS).
- */
-export async function requireAdmin(req: Request): Promise<AdminContext> {
+/** Compte connecté, sans vérifier ses droits. Le jeton est rafraîchi s'il expire bientôt. */
+async function session(req: Request): Promise<SessionContext> {
   let access = readCookie(req, ACCESS_COOKIE);
   const refresh = readCookie(req, REFRESH_COOKIE);
   if (!access && !refresh) throw new HttpError(401, "Connecte-toi avec ton compte.");
@@ -213,9 +231,38 @@ export async function requireAdmin(req: Request): Promise<AdminContext> {
     access = tokens.access_token;
   }
 
-  const db = userDb(access);
-  const apps = await adminApps(db);
-  if (!apps.length) throw new HttpError(403, NO_ACCESS);
   const payload = jwtPayload(access);
-  return { db, userId: payload.sub ?? "", email: payload.email ?? "", apps };
+  return { db: userDb(access), userId: payload.sub ?? "", email: payload.email ?? "" };
+}
+
+/*
+ * Les droits sont relus dans la base à chaque requête : un rôle retiré coupe l'accès aussitôt.
+ * Le droit sur une appli précise est vérifié par la base elle-même (fonctions et RLS).
+ */
+
+/** Compte connecté, admin d'au moins une appli (gestion des équipes). */
+export async function requireAdmin(req: Request): Promise<AdminContext> {
+  const ctx = await session(req);
+  const apps = await adminApps(ctx.db);
+  if (!apps.length) throw new HttpError(403, ADMIN_ONLY);
+  return { ...ctx, apps };
+}
+
+/** Compte connecté, admin d'une appli ou avec un rôle dans Flexform : ce qu'il peut faire dans Flexstaff. */
+export async function requireAccount(req: Request): Promise<Me> {
+  const ctx = await session(req);
+  const me = await accountOf(ctx.db, ctx.email);
+  if (!me.apps.length && !me.staffPage) throw new HttpError(403, NO_ACCESS);
+  return me;
+}
+
+/**
+ * Compte connecté avec le rôle admin ou staff dans Flexform (page /staff). Ses actions sur les tables
+ * sondage_* de Flexform passent par son propre jeton : la RLS de Flexform décide.
+ */
+export async function requireFlexformStaff(req: Request): Promise<FlexformStaffContext> {
+  const ctx = await session(req);
+  const role = await flexformRole(ctx.db);
+  if (!role) throw new HttpError(403, NO_STAFF_ROLE);
+  return { ...ctx, role };
 }

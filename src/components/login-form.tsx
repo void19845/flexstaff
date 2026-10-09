@@ -4,8 +4,23 @@ import { useRef, useState, type FormEvent } from "react";
 import { post } from "@/lib/client/api";
 import { MAX_EMAIL_LENGTH, type Me } from "@/lib/shared/types";
 
-/** Connexion par e-mail et mot de passe (compte Supabase). Réservée aux admins d'une appli de la suite. */
-export function LoginForm({ message = "", onSignedIn }: { message?: string; onSignedIn: (me: Me) => void }) {
+/**
+ * Connexion par e-mail et mot de passe (compte Supabase). Réservée aux admins d'une appli de la suite et au staff
+ * de Flexform. title, intro, note : textes de la page (par défaut, ceux de la gestion des équipes).
+ */
+export function LoginForm({
+  title = "Équipe",
+  intro = "Ajoute des membres et transmets le rôle admin des applis de la suite.",
+  note = "Réservé aux admins d'une appli de la suite et au staff de Flexform.",
+  message = "",
+  onSignedIn,
+}: {
+  title?: string;
+  intro?: string;
+  note?: string;
+  message?: string;
+  onSignedIn: (me: Me) => void;
+}) {
   const [error, setError] = useState(message);
   const [pending, setPending] = useState(false);
   const password = useRef<HTMLInputElement>(null);
@@ -27,8 +42,8 @@ export function LoginForm({ message = "", onSignedIn }: { message?: string; onSi
   return (
     <form className="card login" onSubmit={submit}>
       <p className="eyebrow">Flex Suite</p>
-      <h1>Équipe</h1>
-      <p className="muted">Ajoute des membres et transmets le rôle admin des applis de la suite.</p>
+      <h1>{title}</h1>
+      <p className="muted">{intro}</p>
       <label className="field">
         <span>E-mail</span>
         <input
@@ -51,7 +66,7 @@ export function LoginForm({ message = "", onSignedIn }: { message?: string; onSi
       <button type="submit" className="btn primary big" disabled={pending}>
         Se connecter
       </button>
-      <p className="muted small">{"Réservé aux admins d'une appli de la suite."}</p>
+      <p className="muted small">{note}</p>
     </form>
   );
 }

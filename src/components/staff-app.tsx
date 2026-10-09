@@ -1,9 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { LoginForm } from "@/components/login-form";
 import { TeamPanel } from "@/components/team-panel";
-import { currentAccount } from "@/lib/client/account";
+import { currentAccount, signOut } from "@/lib/client/account";
 import type { Me } from "@/lib/shared/types";
 
 /**
@@ -16,7 +17,10 @@ function toLogin(message: string): (view: View) => View {
   return (view) => ({ name: "login", message, id: view.name === "login" ? view.id + 1 : 0 });
 }
 
-/** Flexstaff : connexion d'un admin de la suite, puis gestion des équipes de ses applis. */
+/**
+ * Flexstaff : connexion d'un admin de la suite, puis gestion des équipes de ses applis.
+ * Un compte qui a seulement un rôle dans Flexform n'a accès qu'à la remise des récompenses (/staff).
+ */
 export function StaffApp() {
   const [view, setView] = useState<View>({ name: "loading" });
 
@@ -35,10 +39,40 @@ export function StaffApp() {
   }, []);
 
   if (view.name === "loading") return null;
-  if (view.name === "panel") return <TeamPanel account={view.me} onSignedOut={(message) => setView(toLogin(message))} />;
+  if (view.name === "panel" && !view.me.apps.length) return <StaffOnly me={view.me} onSignedOut={() => setView(toLogin(""))} />;
+  if (view.name === "panel") {
+    return (
+      <TeamPanel
+        account={view.me}
+        onSignedOut={(message) => setView(toLogin(message))}
+        onNoApps={(me) => setView({ name: "panel", me })}
+      />
+    );
+  }
   return (
     <div className="narrow">
       <LoginForm key={view.id} message={view.message} onSignedIn={(me) => setView({ name: "panel", me })} />
+    </div>
+  );
+}
+
+/** Compte sans appli à administrer, avec un rôle dans Flexform : lien vers la remise des récompenses. */
+function StaffOnly({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
+  return (
+    <div className="narrow">
+      <div className="card login">
+        <p className="eyebrow">Flex Suite</p>
+        <h1>Staff Flexform</h1>
+        <p className="muted">{`Le compte ${me.email} a accès à la remise des récompenses de Flexform. La gestion des équipes est réservée aux admins.`}</p>
+        <div className="actions">
+          <Link className="btn primary" href="/staff">
+            Remise des récompenses
+          </Link>
+          <button type="button" className="btn ghost" onClick={() => void signOut().then(onSignedOut)}>
+            Déconnexion
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

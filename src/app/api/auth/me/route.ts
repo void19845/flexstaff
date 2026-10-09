@@ -1,9 +1,9 @@
-import { json, requireAdmin, route } from "@/lib/server/http";
-import type { Me } from "@/lib/shared/types";
+import { json, requireAccount, route } from "@/lib/server/http";
 
-/** Compte connecté et applis qu'il administre (401 si personne n'est connecté, 403 s'il n'administre plus rien). */
+/**
+ * Compte connecté, applis qu'il administre et accès à /staff
+ * (401 si personne n'est connecté, 403 s'il n'administre plus rien et n'a plus de rôle dans Flexform).
+ */
 export const GET = route(async (req) => {
-  const ctx = await requireAdmin(req);
-  const me: Me = { email: ctx.email, superAdmin: await ctx.db.rpc<boolean>("suite_is_super_admin"), apps: ctx.apps };
-  return json(me);
+  return json(await requireAccount(req));
 });
