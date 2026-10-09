@@ -5,13 +5,13 @@ import { post } from "@/lib/client/api";
 import { MAX_EMAIL_LENGTH, type Me } from "@/lib/shared/types";
 
 /**
- * Connexion par e-mail et mot de passe (compte Supabase). Réservée aux admins d'une appli de la suite et au staff
- * de Flexform. title, intro, note : textes de la page (par défaut, ceux de la gestion des équipes).
+ * Connexion par e-mail et mot de passe (compte Supabase). Réservée aux admins d'une appli de la suite, au staff
+ * de Flexform et à l'équipe Flexstaff. title, intro, note : textes de la page (par défaut, ceux de l'accueil).
  */
 export function LoginForm({
   title = "Équipe",
-  intro = "Ajoute des membres et transmets le rôle admin des applis de la suite.",
-  note = "Réservé aux admins d'une appli de la suite et au staff de Flexform.",
+  intro = "Planifie les événements de l'équipe, ajoute des membres et transmets le rôle admin des applis de la suite.",
+  note = "Réservé aux admins d'une appli de la suite, au staff de Flexform et à l'équipe Flexstaff.",
   message = "",
   onSignedIn,
 }: {

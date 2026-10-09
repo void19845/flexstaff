@@ -106,6 +106,11 @@ export interface FlexformStaffContext extends SessionContext {
   role: Role;
 }
 
+/** Compte de l'équipe Flexstaff (staff ou admin, super admin compris) : calendrier et tâches */
+export interface FlexstaffContext extends SessionContext {
+  role: Role;
+}
+
 interface Tokens {
   access_token: string;
   refresh_token: string;
@@ -148,23 +153,38 @@ async function flexformRole(db: Db): Promise<Role | null> {
   return role === "admin" || role === "staff" ? role : null;
 }
 
-/** Ce que le compte du jeton peut faire dans Flexstaff : applis administrées, page /staff. */
-async function accountOf(db: Db, email: string): Promise<Me> {
-  const [apps, superAdmin, role] = await Promise.all([adminApps(db), db.rpc<boolean>("suite_is_super_admin"), flexformRole(db)]);
-  return { email, superAdmin, apps, staffPage: role !== null };
+/** Rôle du compte du jeton dans l'équipe Flexstaff (calendrier), lu dans la base (super admin : admin). */
+async function flexstaffRole(db: Db): Promise<Role | null> {
+  const role = await db.rpc<string | null>("suite_app_role", { p_app: "flexstaff" });
+  return role === "admin" || role === "staff" ? role : null;
 }
 
-const NO_ACCESS = "Flexstaff est réservé aux admins d'une appli de la suite et au staff de Flexform.";
+/** Ce que le compte du jeton peut faire dans Flexstaff : applis administrées, page /staff, calendrier. */
+async function accountOf(db: Db, email: string): Promise<Me> {
+  const [apps, superAdmin, role, flexstaff] = await Promise.all([
+    adminApps(db),
+    db.rpc<boolean>("suite_is_super_admin"),
+    flexformRole(db),
+    flexstaffRole(db),
+  ]);
+  return { email, superAdmin, apps, staffPage: role !== null, flexstaff };
+}
+
+/** Le compte n'a rien à faire dans Flexstaff : ni appli administrée, ni rôle dans Flexform, ni équipe Flexstaff. */
+const noAccess = (me: Me): boolean => !me.apps.length && !me.staffPage && !me.flexstaff;
+
+const NO_ACCESS = "Flexstaff est réservé aux admins d'une appli de la suite, au staff de Flexform et à l'équipe Flexstaff.";
 const ADMIN_ONLY = "La gestion des équipes est réservée aux admins d'une appli de la suite.";
 const NO_STAFF_ROLE = "Ce compte n'a pas de rôle admin ou staff dans Flexform.";
+const NO_PLANNING_ACCESS = "Réservé à l'équipe Flexstaff.";
 
-/** Connexion. Refusée (sans cookie) si le compte n'est admin d'aucune appli et n'a pas de rôle dans Flexform. */
+/** Connexion. Refusée (sans cookie) si le compte n'a rien à faire dans Flexstaff (voir noAccess). */
 export async function signIn(req: Request, email: string, password: string): Promise<Me> {
   await rateLimit(req, "login", 10);
   const tokens = await authRequest("password", { email, password });
   if (!tokens) throw new HttpError(401, "E-mail ou mot de passe incorrect");
   const me = await accountOf(userDb(tokens.access_token), jwtPayload(tokens.access_token).email ?? email);
-  if (!me.apps.length && !me.staffPage) throw new HttpError(403, NO_ACCESS);
+  if (noAccess(me)) throw new HttpError(403, NO_ACCESS);
   setTokens(req, tokens);
   return me;
 }
@@ -196,7 +216,7 @@ export async function passwordRefused(res: Response): Promise<HttpError | null> 
  * que la connexion), puis le changement est fait avec le jeton de cette nouvelle session, qui remplace l'ancienne.
  * 400 (et non 401) si l'actuel est faux : la session reste ouverte.
  */
-export async function changePassword(req: Request, ctx: AdminContext, current: unknown, next: unknown): Promise<void> {
+export async function changePassword(req: Request, ctx: { email: string }, current: unknown, next: unknown): Promise<void> {
   const password = parseNewPassword(next);
   if (typeof current !== "string" || !current) throw new HttpError(400, "Mot de passe actuel requis.");
   await rateLimit(req, "login", 10);
@@ -248,11 +268,11 @@ export async function requireAdmin(req: Request): Promise<AdminContext> {
   return { ...ctx, apps };
 }
 
-/** Compte connecté, admin d'une appli ou avec un rôle dans Flexform : ce qu'il peut faire dans Flexstaff. */
+/** Compte connecté qui a quelque chose à faire dans Flexstaff (voir noAccess) : ce qu'il peut y faire. */
 export async function requireAccount(req: Request): Promise<Me> {
   const ctx = await session(req);
   const me = await accountOf(ctx.db, ctx.email);
-  if (!me.apps.length && !me.staffPage) throw new HttpError(403, NO_ACCESS);
+  if (noAccess(me)) throw new HttpError(403, NO_ACCESS);
   return me;
 }
 
@@ -264,5 +284,13 @@ export async function requireFlexformStaff(req: Request): Promise<FlexformStaffC
   const ctx = await session(req);
   const role = await flexformRole(ctx.db);
   if (!role) throw new HttpError(403, NO_STAFF_ROLE);
+  return { ...ctx, role };
+}
+
+/** Compte de l'équipe Flexstaff (staff ou admin, super admins compris) : calendrier et tâches. */
+export async function requireFlexstaff(req: Request): Promise<FlexstaffContext> {
+  const ctx = await session(req);
+  const role = await flexstaffRole(ctx.db);
+  if (!role) throw new HttpError(403, NO_PLANNING_ACCESS);
   return { ...ctx, role };
 }

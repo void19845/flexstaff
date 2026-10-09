@@ -19,6 +19,8 @@ export interface Me {
   apps: SuiteApp[];
   /** Accès à /staff : rôle admin ou staff dans Flexform */
   staffPage: boolean;
+  /** Rôle dans l'équipe Flexstaff (calendrier et tâches, voir planning.ts) ; null : pas d'accès au calendrier */
+  flexstaff: Role | null;
 }
 
 /** Membre de l'équipe d'une appli. role "super" : super admin de la suite, défini en SQL, non modifiable ici. */

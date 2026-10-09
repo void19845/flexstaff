@@ -3,22 +3,34 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { LoginForm } from "@/components/login-form";
+import { PlanningPanel } from "@/components/planning-panel";
 import { TeamPanel } from "@/components/team-panel";
 import { currentAccount, signOut } from "@/lib/client/account";
 import type { Me } from "@/lib/shared/types";
+
+/** planning : calendrier de l'équipe Flexstaff ; team : équipes des applis administrées */
+type Section = "planning" | "team";
 
 /**
  * loading : en attente de /api/auth/me ; login : connexion, avec un message éventuel ; panel : tableau de bord.
  * id change à chaque retour à la connexion : le formulaire est recréé (message affiché, bouton réactivé).
  */
-type View = { name: "loading" } | { name: "login"; message: string; id: number } | { name: "panel"; me: Me };
+type View = { name: "loading" } | { name: "login"; message: string; id: number } | { name: "panel"; me: Me; section: Section };
 
 function toLogin(message: string): (view: View) => View {
   return (view) => ({ name: "login", message, id: view.name === "login" ? view.id + 1 : 0 });
 }
 
+/** Section ouverte : celle demandée si le compte y a encore droit, sinon l'autre. */
+function toPanel(me: Me, wanted?: Section): View {
+  const allowed: Section[] = [...(me.flexstaff ? ["planning" as const] : []), ...(me.apps.length ? ["team" as const] : [])];
+  return { name: "panel", me, section: wanted && allowed.includes(wanted) ? wanted : allowed[0] ?? "team" };
+}
+
+const SECTION_LABEL: Record<Section, string> = { planning: "Calendrier", team: "Équipe" };
+
 /**
- * Flexstaff : connexion d'un admin de la suite, puis gestion des équipes de ses applis.
+ * Flexstaff : connexion d'un admin de la suite ou d'un membre de l'équipe Flexstaff, puis calendrier et équipes.
  * Un compte qui a seulement un rôle dans Flexform n'a accès qu'à la remise des récompenses (/staff).
  */
 export function StaffApp() {
@@ -28,7 +40,7 @@ export function StaffApp() {
     let ignore = false;
     currentAccount()
       .then((me) => {
-        if (!ignore) setView(me ? { name: "panel", me } : toLogin(""));
+        if (!ignore) setView(me ? toPanel(me) : toLogin(""));
       })
       .catch((err: unknown) => {
         if (!ignore) setView(toLogin((err as Error).message));
@@ -39,19 +51,33 @@ export function StaffApp() {
   }, []);
 
   if (view.name === "loading") return null;
-  if (view.name === "panel" && !view.me.apps.length) return <StaffOnly me={view.me} onSignedOut={() => setView(toLogin(""))} />;
+  if (view.name === "panel" && !view.me.apps.length && !view.me.flexstaff) {
+    return <StaffOnly me={view.me} onSignedOut={() => setView(toLogin(""))} />;
+  }
   if (view.name === "panel") {
-    return (
-      <TeamPanel
-        account={view.me}
-        onSignedOut={(message) => setView(toLogin(message))}
-        onNoApps={(me) => setView({ name: "panel", me })}
-      />
+    const { me, section } = view;
+    const onSignedOut = (message: string): void => setView(toLogin(message));
+    const onAccountChange = (fresh: Me): void => setView((v) => toPanel(fresh, v.name === "panel" ? v.section : undefined));
+    // Navigation seulement pour un compte qui a accès aux deux sections
+    const nav =
+      me.flexstaff && me.apps.length ? (
+        <nav className="tabs" aria-label="Sections de Flexstaff">
+          {(["planning", "team"] as const).map((s) => (
+            <button key={s} type="button" className="btn tab" aria-current={s === section ? "page" : undefined} onClick={() => setView(toPanel(me, s))}>
+              {SECTION_LABEL[s]}
+            </button>
+          ))}
+        </nav>
+      ) : null;
+    return section === "planning" ? (
+      <PlanningPanel account={me} nav={nav} onAccountChange={onAccountChange} onSignedOut={onSignedOut} />
+    ) : (
+      <TeamPanel account={me} nav={nav} onAccountChange={onAccountChange} onSignedOut={onSignedOut} />
     );
   }
   return (
     <div className="narrow">
-      <LoginForm key={view.id} message={view.message} onSignedIn={(me) => setView({ name: "panel", me })} />
+      <LoginForm key={view.id} message={view.message} onSignedIn={(me) => setView(toPanel(me))} />
     </div>
   );
 }
